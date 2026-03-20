@@ -58,8 +58,26 @@ class GitHubMarkdownSyncService
                 ->get()
                 ->keyBy('source_path');
 
+            $filesByFolder = $this->groupFilesByFolder($files);
+            $indexFiles = $this->extractIndexFiles($filesByFolder);
+            $metaFiles = $this->extractMetaFiles($filesByFolder);
+
+            $categoryResults = $this->processFolderCategories($mod, $filesByFolder, $indexFiles, $metaFiles, $existingGithubPages, $pagesBySourcePath);
+            $created += $categoryResults['created'];
+            $updated += $categoryResults['updated'];
+            $deleted += $categoryResults['deleted'];
+
             foreach ($files as $orderIndex => $file) {
                 $sourcePath = $file['path'];
+
+                if ($this->isIndexFile($sourcePath)) {
+                    continue;
+                }
+
+                if ($this->isMetaFile($sourcePath)) {
+                    continue;
+                }
+
                 $page = $existingGithubPages->get($sourcePath);
                 $parsedContent = $this->parseFrontMatter($file['content']);
                 $metadata = $parsedContent['metadata'];
@@ -85,17 +103,13 @@ class GitHubMarkdownSyncService
                 $page->published = $this->resolvePublished($metadata);
                 $page->updated_by = $mod->owner_id;
                 $page->order_index = $this->resolveOrderIndex($metadata, $orderIndex);
-                $page->is_index = $this->resolveIndexFlag($sourcePath, $metadata);
+                $page->is_index = false;
 
                 if (! $page->slug) {
                     $page->slug = $this->buildUniqueSlug($mod, $page->title, $page->id);
                 }
 
                 $page->save();
-
-                if ($page->is_index) {
-                    $indexPageId = $page->id;
-                }
 
                 $pagesBySourcePath[$sourcePath] = $page;
 
@@ -107,7 +121,7 @@ class GitHubMarkdownSyncService
             }
 
             foreach ($pagesBySourcePath as $sourcePath => $page) {
-                $parentSourcePath = $this->parentReadmeSourcePath($sourcePath);
+                $parentSourcePath = $this->getParentFolderSourcePath($sourcePath, $filesByFolder, $indexFiles);
                 $parentId = $parentSourcePath ? ($pagesBySourcePath[$parentSourcePath]->id ?? null) : null;
 
                 if ($page->parent_id !== $parentId) {
@@ -182,7 +196,7 @@ class GitHubMarkdownSyncService
             ->get("https://api.github.com/repos/{$owner}/{$repo}");
 
         if (! $response->successful()) {
-            throw new RuntimeException("Unable to read repository metadata for {$owner}/{$repo}.");
+            throw new RuntimeException("Unable to read repository metadata for {$owner}/{$repo}. {$response->body()}");
         }
 
         return (string) $response->json('default_branch', 'main');
@@ -227,7 +241,10 @@ class GitHubMarkdownSyncService
             }
 
             $name = (string) ($item['name'] ?? '');
-            if (! str_ends_with(strtolower($name), '.md')) {
+            $isMarkdownFile = str_ends_with(strtolower($name), '.md');
+            $isMetaFile = strtolower($name) === 'meta.json';
+
+            if (! ($isMarkdownFile || $isMetaFile)) {
                 continue;
             }
 
@@ -239,7 +256,7 @@ class GitHubMarkdownSyncService
             $contentResponse = Http::timeout(30)->get($downloadUrl);
 
             if (! $contentResponse->successful()) {
-                throw new RuntimeException("Unable to download markdown file: {$downloadUrl}");
+                throw new RuntimeException("Unable to download file: {$downloadUrl}");
             }
 
             $fullPath = (string) ($item['path'] ?? '');
@@ -255,6 +272,271 @@ class GitHubMarkdownSyncService
                 'content' => $contentResponse->body(),
             ];
         }
+    }
+
+    /**
+     * Group files by their folder path.
+     * @param  array<int, array{path:string,sha:string,content:string}>  $files
+     * @return array<string, array<int, array{path:string,sha:string,content:string}>>
+     */
+    private function groupFilesByFolder(array $files): array
+    {
+        $grouped = [];
+
+        foreach ($files as $file) {
+            $folder = dirname($file['path']);
+            if ($folder === '.') {
+                $folder = '';
+            }
+
+            if (!isset($grouped[$folder])) {
+                $grouped[$folder] = [];
+            }
+
+            $grouped[$folder][] = $file;
+        }
+
+        return $grouped;
+    }
+
+    /**
+     * Extract index files from grouped files by folder.
+     * @param  array<string, array<int, array{path:string,sha:string,content:string}>>  $filesByFolder
+     * @return array<string, array{path:string,sha:string,content:string}>
+     */
+    private function extractIndexFiles(array $filesByFolder): array
+    {
+        $indexFiles = [];
+
+        foreach ($filesByFolder as $folder => $files) {
+            foreach ($files as $file) {
+                if ($this->isIndexFile($file['path'])) {
+                    $indexFiles[$folder] = $file;
+                }
+            }
+        }
+
+        return $indexFiles;
+    }
+
+    /**
+     * Extract meta.json files from grouped files by folder.
+     * @param  array<string, array<int, array{path:string,sha:string,content:string}>>  $filesByFolder
+     * @return array<string, array{path:string,sha:string,content:string}>
+     */
+    private function extractMetaFiles(array $filesByFolder): array
+    {
+        $metaFiles = [];
+
+        foreach ($filesByFolder as $folder => $files) {
+            foreach ($files as $file) {
+                if (basename($file['path']) === 'meta.json') {
+                    $metaFiles[$folder] = $file;
+                }
+            }
+        }
+
+        return $metaFiles;
+    }
+
+    /**
+     * Check if a file is an index file (index.md or README.md).
+     */
+    private function isIndexFile(string $sourcePath): bool
+    {
+        $filename = basename($sourcePath);
+        return strtolower($filename) === 'index.md' || strtoupper($filename) === 'README.md';
+    }
+
+    /**
+     * Check if a file is a meta.json file.
+     */
+    private function isMetaFile(string $sourcePath): bool
+    {
+        return basename($sourcePath) === 'meta.json';
+    }
+
+    /**
+     * Get the source path for the parent folder's index.md or category.
+     * Returns null if at root level.
+     * @param  array<string, array<int, array{path:string,sha:string,content:string}>>  $filesByFolder
+     * @param  array<string, array{path:string,sha:string,content:string}>  $indexFiles
+     */
+    private function getParentFolderSourcePath(string $sourcePath, array $filesByFolder, array $indexFiles): ?string
+    {
+        if ($this->isIndexFile($sourcePath)) {
+            $directory = dirname($sourcePath);
+
+            if ($directory === '' || $directory === '.') {
+                return null;
+            }
+
+            $parentDirectory = dirname($directory);
+
+            if ($parentDirectory === '' || $parentDirectory === '.') {
+                return null;
+            }
+
+            if (isset($indexFiles[$parentDirectory])) {
+                return $indexFiles[$parentDirectory]['path'];
+            }
+
+            if (isset($filesByFolder[$parentDirectory])) {
+                return $parentDirectory;
+            }
+
+            return null;
+        }
+
+        $directory = dirname($sourcePath);
+
+        if ($directory === '' || $directory === '.') {
+            return null;
+        }
+
+        if (isset($indexFiles[$directory])) {
+            return $indexFiles[$directory]['path'];
+        }
+
+        if (isset($filesByFolder[$directory])) {
+            return $directory;
+        }
+
+        return null;
+    }
+
+    /**
+     * Process folder categories and index pages.
+     * @param  array<string, array<int, array{path:string,sha:string,content:string}>>  $filesByFolder
+     * @param  array<string, array{path:string,sha:string,content:string}>  $indexFiles
+     * @param  array<string, array{path:string,sha:string,content:string}>  $metaFiles
+     * @param  \Illuminate\Support\Collection<string, Page>  $existingGithubPages
+     * @param  array<string, \App\Models\Page>  &$pagesBySourcePath
+     * @return array{created:int,updated:int,deleted:int}
+     */
+    private function processFolderCategories(
+        Mod $mod,
+        array $filesByFolder,
+        array $indexFiles,
+        array $metaFiles,
+        $existingGithubPages,
+        array &$pagesBySourcePath
+    ): array
+    {
+        $created = 0;
+        $updated = 0;
+        $deleted = 0;
+        $processedFolders = [];
+
+        foreach ($filesByFolder as $folder => $folderFiles) {
+            $hasIndexFile = isset($indexFiles[$folder]);
+
+            if ($hasIndexFile) {
+                $indexFile = $indexFiles[$folder];
+                $sourcePath = $indexFile['path'];
+                $page = $existingGithubPages->get($sourcePath);
+                $parsedContent = $this->parseFrontMatter($indexFile['content']);
+                $metadata = $parsedContent['metadata'];
+
+                $isNew = false;
+                if (!$page) {
+                    $isNew = true;
+                    $page = new Page([
+                        'mod_id' => $mod->id,
+                        'created_by' => $mod->owner_id,
+                    ]);
+                } elseif ($page->trashed()) {
+                    $page->restore();
+                }
+
+                $page->source_type = 'github';
+                $page->source_path = $sourcePath;
+                $page->source_sha = $indexFile['sha'];
+                $page->kind = Page::KIND_PAGE;
+                $page->title = $this->resolveTitle($sourcePath, $metadata);
+                $page->content = $parsedContent['content'];
+                $page->published = $this->resolvePublished($metadata);
+                $page->updated_by = $mod->owner_id;
+                $page->order_index = $this->resolveOrderIndex($metadata, 0);
+                $page->is_index = $sourcePath === 'index.md' || $sourcePath === 'README.md';
+
+                if (!$page->slug) {
+                    $page->slug = $this->buildUniqueSlug($mod, $page->title, $page->id);
+                }
+
+                $page->save();
+                $pagesBySourcePath[$sourcePath] = $page;
+
+                if ($isNew) {
+                    $created++;
+                } else {
+                    $updated++;
+                }
+            } else if ($folder !== '') {
+                $categorySourcePath = $folder;
+                $page = $existingGithubPages->get($categorySourcePath);
+
+                $isNew = false;
+                if (!$page) {
+                    $isNew = true;
+                    $page = new Page([
+                        'mod_id' => $mod->id,
+                        'created_by' => $mod->owner_id,
+                    ]);
+                } elseif ($page->trashed()) {
+                    $page->restore();
+                }
+
+                $categoryTitle = $this->titleFromPath($folder.'/index.md');
+                $categoryMetadata = [];
+                if (isset($metaFiles[$folder])) {
+                    $metaData = json_decode($metaFiles[$folder]['content'], true);
+                    if (json_last_error() === JSON_ERROR_NONE && is_array($metaData)) {
+                        if (isset($metaData['title']) && is_string($metaData['title'])) {
+                            $categoryTitle = $metaData['title'];
+                        }
+                        $categoryMetadata = $metaData;
+                    } else {
+                        \Log::warning('Invalid JSON in meta.json for folder: ' . $folder, [
+                            'error' => json_last_error_msg(),
+                            'path' => $metaFiles[$folder]['path'],
+                        ]);
+                    }
+                }
+
+                $page->source_type = 'github';
+                $page->source_path = $categorySourcePath;
+                $page->source_sha = '';
+                $page->kind = Page::KIND_CATEGORY;
+                $page->title = $categoryTitle;
+                $page->content = '';
+                $page->published = $categoryMetadata['published'] ?? true;
+                $page->updated_by = $mod->owner_id;
+                $page->order_index = $categoryMetadata['order'] ?? 0;
+                $page->is_index = false;
+
+                if (!$page->slug) {
+                    $page->slug = $this->buildUniqueSlug($mod, $page->title, $page->id);
+                }
+
+                $page->save();
+                $pagesBySourcePath[$categorySourcePath] = $page;
+
+                if ($isNew) {
+                    $created++;
+                } else {
+                    $updated++;
+                }
+            }
+
+            $processedFolders[] = $folder;
+        }
+
+        return [
+            'created' => $created,
+            'updated' => $updated,
+            'deleted' => $deleted,
+        ];
     }
 
     private function toRelativePath(string $fullPath, string $basePath): string
@@ -329,18 +611,6 @@ class GitHubMarkdownSyncService
         }
 
         return true;
-    }
-
-    /**
-     * @param  array<string, mixed>  $metadata
-     */
-    private function resolveIndexFlag(string $sourcePath, array $metadata): bool
-    {
-        if (isset($metadata['is_index']) && is_bool($metadata['is_index'])) {
-            return $metadata['is_index'];
-        }
-
-        return $sourcePath === 'README.md';
     }
 
     /**
@@ -423,16 +693,6 @@ class GitHubMarkdownSyncService
         return $value;
     }
 
-    private function parentReadmeSourcePath(string $sourcePath): ?string
-    {
-        $directory = dirname($sourcePath);
-
-        if ($directory === '.') {
-            return null;
-        }
-
-        return $directory.'/README.md';
-    }
 
     private function buildUniqueSlug(Mod $mod, string $title, ?string $ignorePageId = null): string
     {
