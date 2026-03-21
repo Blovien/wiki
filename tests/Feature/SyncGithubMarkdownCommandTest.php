@@ -187,7 +187,33 @@ class SyncGithubMarkdownCommandTest extends TestCase
         ]);
     }
 
-    private function fakeRepoContents(string $installContent, string $installSha = 'sha-install'): void
+    public function test_it_prunes_removed_github_pages_by_default(): void
+    {
+        $owner = User::factory()->create();
+
+        $mod = Mod::factory()->create([
+            'owner_id' => $owner->id,
+            'github_repository_url' => 'https://github.com/acme/docs-repo',
+            'github_repository_path' => '/docs/',
+        ]);
+
+        $this->fakeRepoContents('# Install', 'sha-install', includeGettingStarted: true);
+        $this->artisan('mods:sync-github-markdown')->assertSuccessful();
+
+        $stalePage = Page::where('mod_id', $mod->id)
+            ->where('source_path', 'getting-started.md')
+            ->firstOrFail();
+
+        $this->fakeRepoContents('# Install', 'sha-install', includeGettingStarted: false);
+        $this->artisan('mods:sync-github-markdown')->assertSuccessful();
+
+        $stalePage->refresh();
+
+        $this->assertNull($stalePage->deleted_at);
+    }
+
+
+    private function fakeRepoContents(string $installContent, string $installSha = 'sha-install', bool $includeGettingStarted = true): void
     {
         $rootListing = [
             [
@@ -198,18 +224,21 @@ class SyncGithubMarkdownCommandTest extends TestCase
                 'download_url' => 'https://raw.githubusercontent.com/acme/docs-repo/main/docs/README.md',
             ],
             [
-                'type' => 'file',
-                'name' => 'getting-started.md',
-                'path' => 'docs/getting-started.md',
-                'sha' => 'sha-getting-started',
-                'download_url' => 'https://raw.githubusercontent.com/acme/docs-repo/main/docs/getting-started.md',
-            ],
-            [
                 'type' => 'dir',
                 'name' => 'guide',
                 'path' => 'docs/guide',
             ],
         ];
+
+        if ($includeGettingStarted) {
+            array_splice($rootListing, 1, 0, [[
+                'type' => 'file',
+                'name' => 'getting-started.md',
+                'path' => 'docs/getting-started.md',
+                'sha' => 'sha-getting-started',
+                'download_url' => 'https://raw.githubusercontent.com/acme/docs-repo/main/docs/getting-started.md',
+            ]]);
+        }
 
         Http::fake([
             'https://api.github.com/repos/acme/docs-repo' => Http::response([

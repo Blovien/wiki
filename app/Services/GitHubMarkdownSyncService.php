@@ -14,7 +14,7 @@ class GitHubMarkdownSyncService
     /**
      * @return array{created:int,updated:int,deleted:int,total:int}
      */
-    public function syncMod(Mod $mod, bool $prune = false, bool $dryRun = false): array
+    public function syncMod(Mod $mod, bool $prune = true, bool $dryRun = false): array
     {
         [$owner, $repo] = $this->parseRepository($mod->github_repository_url);
         $basePath = $this->normalizeBasePath($mod->github_repository_path);
@@ -139,12 +139,21 @@ class GitHubMarkdownSyncService
             }
 
             if ($prune) {
-                $syncedPaths = array_keys($pagesBySourcePath);
+                $syncedPaths = array_fill_keys(array_keys($pagesBySourcePath), true);
 
-                $pagesToDelete = Page::where('mod_id', $mod->id)
-                    ->where('source_type', 'github')
-                    ->whereNotIn('source_path', $syncedPaths)
-                    ->get();
+                $pagesToDelete = $existingGithubPages
+                    ->filter(function (Page $page) use ($syncedPaths): bool {
+                        if ($page->trashed()) {
+                            return false;
+                        }
+
+                        if ($page->source_path === null) {
+                            return true;
+                        }
+
+                        return ! isset($syncedPaths[$page->source_path]);
+                    })
+                    ->values();
 
                 foreach ($pagesToDelete as $page) {
                     $page->delete();
@@ -345,7 +354,8 @@ class GitHubMarkdownSyncService
     private function isIndexFile(string $sourcePath): bool
     {
         $filename = basename($sourcePath);
-        return strtolower($filename) === 'index.md' || strtoupper($filename) === 'README.md';
+
+        return in_array(strtolower($filename), ['index.md', 'readme.md'], true);
     }
 
     /**

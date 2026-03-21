@@ -11,7 +11,7 @@ class SyncGithubMarkdown extends Command
 {
     protected $signature = 'mods:sync-github-markdown
                             {--mod= : Mod UUID or slug to sync}
-                            {--prune : Soft-delete synced pages that no longer exist in the repository}
+                            {--prune : Deprecated; syncing now always prunes removed GitHub pages}
                             {--dry-run : Show files discovered without writing to the database}';
 
     protected $description = 'Sync markdown files from configured public GitHub repositories into mod pages';
@@ -49,7 +49,7 @@ class SyncGithubMarkdown extends Command
             try {
                 $result = $syncService->syncMod(
                     mod: $mod,
-                    prune: (bool) $this->option('prune'),
+                    prune: true,
                     dryRun: (bool) $this->option('dry-run'),
                 );
 
