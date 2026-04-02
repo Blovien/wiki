@@ -33,7 +33,7 @@
 
   --markdown-code-block-bg: var(--color-muted);
   --markdown-code-block-fg: var(--color-primary);
-  
+
   --markdown-inline-code-bg: color-mix(
     in oklab,
     var(--color-muted-foreground) 20%,
@@ -52,7 +52,7 @@
 
   --markdown-hr-color: var(--color-border);
 
-   --markdown-table-border: var(--color-border);
+  --markdown-table-border: var(--color-border);
   --markdown-table-header-border: var(--color-accent);
 }
 
@@ -75,7 +75,7 @@
 
 .prose strong em,
 .prose em strong {
-  color: var(--markdown-text-fg); 
+  color: var(--markdown-text-fg);
 }
 
 .prose pre.hljs-code-block {
