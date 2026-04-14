@@ -172,7 +172,7 @@ class Mod extends Model
 
         $permissions = [
             'owner' => ['view', 'edit', 'delete', 'manage_collaborators', 'manage_settings'],
-            'admin' => ['view', 'edit', 'manage_collaborators'],
+            'admin' => ['view', 'edit', 'manage_collaborators', 'manage_settings'],
             'editor' => ['view', 'edit'],
             'viewer' => ['view'],
         ];
